@@ -48,8 +48,6 @@ def sync(aim_repo, mlflow_tracking_uri, experiment, exclude_artifacts, run_statu
         run_statuses=run_statuses
     )
 
-    click.echo('Converting existing MLflow logs.')
-
     click.echo(f'Starting watcher on {mlflow_tracking_uri}.')
     watcher.start()
     from aimlflow.utils import _wait_forever

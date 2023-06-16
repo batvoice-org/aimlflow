@@ -105,12 +105,6 @@ def collect_run_params(aim_run, mlflow_run):
         k: v for k, v in mlflow_run.data.tags.items() if not k.startswith('mlflow')
     }
 
-    # for tag in aim_run.tags:
-    #     aim_run.remove_tag(tag)
-    #
-    # for k, v in mlflow_run.data.tags.items():
-    #     if not k.startswith('mlflow'):
-    #         aim_run.add_tag(f"{k}::{v}")
 
 def collect_artifacts(aim_run, mlflow_run, mlflow_client, exclude_artifacts):
     if '*' in exclude_artifacts:
