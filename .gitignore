@@ -133,3 +133,8 @@ dmypy.json
 
 # mlflow
 mlruns/
+
+# Development
+.env*
+launch_sync.bash
+.idea/*

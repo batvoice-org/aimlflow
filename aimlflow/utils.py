@@ -37,37 +37,6 @@ AUDIO_EXTENSIONS = (
 )
 
 
-class RunHashCache:
-    def __init__(self, repo_path, no_cache=False):
-        self._cache_path = os.path.join(repo_path, 'mlflow_logs_cache')
-        self._needs_refresh = False
-
-        if no_cache and os.path.exists(self._cache_path):
-            os.remove(self._cache_path)
-
-        try:
-            with open(self._cache_path) as FS:
-                self._cache = json.load(FS)
-        except Exception:
-            self._cache = {}
-
-    def get(self, run_id):
-        return self._cache.get(run_id)
-
-    def __setitem__(self, key: str, val: str):
-        if not self._cache.get(key) == val:
-            self._cache[key] = val
-            self._needs_refresh = True
-
-    def __getitem__(self, key: str):
-        return self._cache[key]
-
-    def refresh(self):
-        if self._needs_refresh:
-            with open(self._cache_path, 'w') as FS:
-                json.dump(self._cache, FS)
-
-
 def get_mlflow_experiments(client, experiment):
     if experiment is None:
         # process all experiments
@@ -84,14 +53,16 @@ def get_mlflow_experiments(client, experiment):
     return experiments
 
 
-def get_aim_run(repo_inst, run_id, run_name, experiment_name, run_cache):
-    if run_cache.get(run_id):
+def get_aim_run(repo_inst, run_id, run_name, experiment_name):
+    query = f"run.mlflow_run_id == '{run_id}'"
+    query_res = repo_inst.query_runs(query).iter_runs()
+
+    if aim_run_info := next(query_res, None):
         aim_run = Run(
-            run_hash=run_cache[run_id],
+            run_hash=aim_run_info.run.hash,
             repo=repo_inst,
             system_tracking_interval=None,
             capture_terminal_logs=False,
-            experiment=experiment_name,
         )
     else:
         aim_run = Run(
@@ -100,9 +71,26 @@ def get_aim_run(repo_inst, run_id, run_name, experiment_name, run_cache):
             capture_terminal_logs=False,
             experiment=experiment_name,
         )
-        run_cache[run_id] = aim_run.hash
+
     aim_run.name = run_name
+
     return aim_run
+
+def get_aim_run_from_run_id(repo_inst, run_id):
+    query = f"run.mlflow_run_id == '{run_id}'"
+    query_res = repo_inst.query_runs(query).iter_runs()
+
+    if aim_run_info := next(query_res, None):
+        aim_run = Run(
+            run_hash=aim_run_info.run.hash,
+            repo=repo_inst,
+            system_tracking_interval=None,
+            capture_terminal_logs=False,
+        )
+
+        return aim_run
+
+    return None
 
 
 def collect_run_params(aim_run, mlflow_run):
@@ -211,29 +199,6 @@ def collect_metrics(aim_run, mlflow_run, mlflow_client, timestamp=None):
 
         for m in metric_history:
             aim_run.track(m.value, step=m.step, name=m.key)
-
-
-def convert_existing_logs(repo_inst, tracking_uri, experiment=None, excluded_artifacts=None, no_cache=False):
-    client = mlflow.tracking.client.MlflowClient(tracking_uri=tracking_uri)
-
-    experiments = get_mlflow_experiments(client, experiment)
-    run_cache = RunHashCache(repo_inst.path, no_cache)
-    for ex in tqdm(experiments, desc=f'Parsing mlflow experiments in {tracking_uri}', total=len(experiments)):
-        runs = client.search_runs(ex.experiment_id)
-
-        for run in tqdm(runs, desc=f'Parsing mlflow runs for experiment `{ex.name}`', total=len(runs)):
-            # get corresponding `aim.Run` object for mlflow run
-            aim_run = get_aim_run(repo_inst, run.info.run_id, run.info.run_name, ex.name, run_cache)
-            # Collect params and tags
-            collect_run_params(aim_run, run)
-
-            # Collect metrics
-            collect_metrics(aim_run, run, client)
-
-            # Collect artifacts
-            collect_artifacts(aim_run, run, client, excluded_artifacts)
-
-    run_cache.refresh()
 
 
 def _wait_forever(watcher):

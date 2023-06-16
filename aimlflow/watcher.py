@@ -2,7 +2,7 @@ import logging
 import time
 
 from threading import Thread
-from typing import Union, TYPE_CHECKING, Dict
+from typing import Union, TYPE_CHECKING, Dict, List
 
 import mlflow.entities
 from mlflow import MlflowClient
@@ -12,7 +12,7 @@ from aimlflow.utils import (
     collect_metrics,
     collect_artifacts,
     collect_run_params,
-    RunHashCache
+    get_aim_run_from_run_id
 )
 
 if TYPE_CHECKING:
@@ -30,6 +30,7 @@ class MLFlowWatcher:
                  experiment: str = None,
                  exclude_artifacts: str = None,
                  interval: Union[int, float] = WATCH_INTERVAL_DEFAULT,
+                 run_statuses: List[mlflow.entities.RunStatus] = None
                  ):
 
         self._last_watch_time = time.time()
@@ -43,6 +44,7 @@ class MLFlowWatcher:
         self._experiment = experiment
         self._experiments = get_mlflow_experiments(self._client, self._experiment)
         self._repo = repo
+        self._run_statuses = run_statuses or [mlflow.entities.RunStatus.RUNNING]
 
         self._th_collector = Thread(target=self._watch, daemon=True)
         self._shutdown = False
@@ -65,16 +67,18 @@ class MLFlowWatcher:
     def _search_experiment(self, experiment_id):
         return next((exp for exp in self._experiments if exp.experiment_id == experiment_id), None)
 
-    def _get_current_active_mlflow_runs(self):
+    def _get_current_valid_mlflow_runs(self):
         experiment_ids = [ex.experiment_id for ex in self._experiments]
 
-        active_runs = self._client.search_runs(
-            experiment_ids=experiment_ids,
-            run_view_type=mlflow.entities.ViewType.ACTIVE_ONLY,
-            filter_string='attribute.status="RUNNING"'
-        )
+        valid_runs = []
+        for run_status in self._run_statuses:
+            valid_runs += self._client.search_runs(
+                experiment_ids=experiment_ids,
+                run_view_type=mlflow.entities.ViewType.ACTIVE_ONLY,
+                filter_string=f'attribute.status="{mlflow.entities.RunStatus.to_string(run_status)}"'
+            )
 
-        return active_runs
+        return valid_runs
 
     def _process_single_run(self, aim_run, mlflow_run):
         # Collect params and tags
@@ -92,43 +96,48 @@ class MLFlowWatcher:
         # refresh experiments list
         self._experiments = get_mlflow_experiments(self._client, self._experiment)
 
-        # process active runs
-        active_mlflow_runs = self._get_current_active_mlflow_runs()
+        # process valid runs
+        valid_mlflow_runs = {
+            run.info.run_id: run
+            for run in self._get_current_valid_mlflow_runs()
+        }
 
-        run_cache = RunHashCache(self._repo.path)
-        active_mlflow_run_ids = set()
+        valid_aim_runs = {
+            run.get("mlflow_run_id"): run
+            for run in self._repo.iter_runs()
+            if run.get("mlflow_run_id", None)
+        }
 
-        for mlflow_run in active_mlflow_runs:
-            mlflow_run_id = mlflow_run.info.run_id
-            active_mlflow_run_ids.add(mlflow_run_id)
-            mlflow_experiment = self._search_experiment(mlflow_run.info.experiment_id)
-            if self._active_aim_runs_pool.get(mlflow_run_id):
-                aim_run = self._active_aim_runs_pool[mlflow_run_id]
-            else:
-                aim_run = get_aim_run(self._repo,
-                                      mlflow_run.info.run_id,
-                                      mlflow_run.info.run_name,
-                                      mlflow_experiment.name,
-                                      run_cache)
-                self._active_aim_runs_pool[mlflow_run_id] = aim_run
+        valid_mlflow_ids = set(valid_mlflow_runs.keys())
+        valid_aim_ids = set(valid_aim_runs.keys())
+        logger.info("valid_mlflow_ids", valid_mlflow_ids)
+        logger.info("valid_aim_ids", valid_aim_ids)
+
+
+        ids_to_remove = valid_aim_ids - valid_mlflow_ids
+        ids_to_add = valid_mlflow_ids - valid_aim_ids
+
+        logger.info("ids_to_remove", ids_to_remove)
+        logger.info("ids_to_add", ids_to_add)
+
+        # Adding new items
+        for run_id in ids_to_add: #.union(ids_to_update):
+            mlflow_run = valid_mlflow_runs[run_id]
+            aim_run = get_aim_run(self._repo,
+                                  run_id,
+                                  mlflow_run.info.run_name,
+                                  mlflow_run.info.experiment_id,        # TODO: Transform into name
+            )
 
             self._process_single_run(aim_run, mlflow_run)
 
-        # process closed runs
-        all_mlflow_run_ids = set(self._active_aim_runs_pool.keys())
-        closed_mlflow_run_ids = all_mlflow_run_ids.difference(active_mlflow_run_ids)
+            del aim_run
 
-        for mlflow_run_id in closed_mlflow_run_ids:
-            # process closed run and remove from pool
-            mlflow_run = self._client.get_run(mlflow_run_id)
-            aim_run = self._active_aim_runs_pool[mlflow_run_id]
-            self._process_single_run(aim_run, mlflow_run)
-            aim_run.close()
-            del self._active_aim_runs_pool[mlflow_run_id]
-
-        # refresh runs cache and update timer
-        self._last_watch_time = watch_started_time
-        run_cache.refresh()
+        for run_id in ids_to_remove:
+            if aim_run := get_aim_run_from_run_id(self._repo, run_id):
+                hash = aim_run.hash
+                del aim_run
+                self._repo.delete_run(hash)
 
     def _watch(self):
         self._process_runs()
