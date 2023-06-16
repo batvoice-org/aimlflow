@@ -91,53 +91,56 @@ class MLFlowWatcher:
         collect_artifacts(aim_run, mlflow_run, self._client, self._exclude_artifacts)
 
     def _process_runs(self):
-        watch_started_time = time.time()
+        try:
+            # refresh experiments list
+            self._experiments = get_mlflow_experiments(self._client, self._experiment)
 
-        # refresh experiments list
-        self._experiments = get_mlflow_experiments(self._client, self._experiment)
+            # process valid runs
+            valid_mlflow_runs = {
+                run.info.run_id: run
+                for run in self._get_current_valid_mlflow_runs()
+            }
 
-        # process valid runs
-        valid_mlflow_runs = {
-            run.info.run_id: run
-            for run in self._get_current_valid_mlflow_runs()
-        }
+            valid_aim_runs = {
+                run.get("mlflow_run_id"): run
+                for run in self._repo.iter_runs()
+                if run.get("mlflow_run_id", None)
+            }
 
-        valid_aim_runs = {
-            run.get("mlflow_run_id"): run
-            for run in self._repo.iter_runs()
-            if run.get("mlflow_run_id", None)
-        }
-
-        valid_mlflow_ids = set(valid_mlflow_runs.keys())
-        valid_aim_ids = set(valid_aim_runs.keys())
-        logger.info("valid_mlflow_ids", valid_mlflow_ids)
-        logger.info("valid_aim_ids", valid_aim_ids)
+            valid_mlflow_ids = set(valid_mlflow_runs.keys())
+            valid_aim_ids = set(valid_aim_runs.keys())
+            logger.info("valid_mlflow_ids", valid_mlflow_ids)
+            logger.info("valid_aim_ids", valid_aim_ids)
 
 
-        ids_to_remove = valid_aim_ids - valid_mlflow_ids
-        ids_to_add = valid_mlflow_ids - valid_aim_ids
+            ids_to_remove = valid_aim_ids - valid_mlflow_ids
+            ids_to_add = valid_mlflow_ids - valid_aim_ids
 
-        logger.info("ids_to_remove", ids_to_remove)
-        logger.info("ids_to_add", ids_to_add)
+            logger.info("ids_to_remove", ids_to_remove)
+            logger.info("ids_to_add", ids_to_add)
 
-        # Adding new items
-        for run_id in ids_to_add: #.union(ids_to_update):
-            mlflow_run = valid_mlflow_runs[run_id]
-            aim_run = get_aim_run(self._repo,
-                                  run_id,
-                                  mlflow_run.info.run_name,
-                                  mlflow_run.info.experiment_id,        # TODO: Transform into name
-            )
+            # Adding new items
+            for run_id in ids_to_add: #.union(ids_to_update):
+                mlflow_run = valid_mlflow_runs[run_id]
+                aim_run = get_aim_run(self._repo,
+                                      run_id,
+                                      mlflow_run.info.run_name,
+                                      mlflow_run.info.experiment_id,        # TODO: Transform into name
+                )
 
-            self._process_single_run(aim_run, mlflow_run)
+                self._process_single_run(aim_run, mlflow_run)
 
-            del aim_run
-
-        for run_id in ids_to_remove:
-            if aim_run := get_aim_run_from_run_id(self._repo, run_id):
-                hash = aim_run.hash
                 del aim_run
-                self._repo.delete_run(hash)
+
+            for run_id in ids_to_remove:
+                if aim_run := get_aim_run_from_run_id(self._repo, run_id):
+                    hash = aim_run.hash
+                    del aim_run
+                    self._repo.delete_run(hash)
+        except Exception as e:
+            logger.error(repr(e))
+            import traceback
+            traceback.print_exception()
 
     def _watch(self):
         self._process_runs()
