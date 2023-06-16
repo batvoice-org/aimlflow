@@ -140,7 +140,7 @@ class MLFlowWatcher:
         except Exception as e:
             logger.error(repr(e))
             import traceback
-            traceback.print_exception()
+            traceback.print_exc()
 
     def _watch(self):
         self._process_runs()
